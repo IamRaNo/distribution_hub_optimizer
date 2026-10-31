@@ -1,25 +1,8 @@
+-- Active: 1745477253100@@127.0.0.1@3306@logistic_db
 -- =====================================================================
 -- Distribution Hub Optimizer (India)
 -- Database : logistic_db
--- Raw tables (already loaded): bill, gsdp, population
--- Clean tables never reuse a raw table name, so raw data is never dropped.
---
--- Questions
---   Q1. Forecast goods amount per state for the next 2 years
---   Q2. Classify states by per capita amount gain vs GSDP gain
---   Q3. Cluster states
---
--- Key decisions
---   * Fiscal year (Apr-Mar) is used everywhere: Apr 2022 - Mar 2023 = FY 2022-23
---     (fy_start = 2022). Only complete 12-month fiscal years are kept.
---   * Population year Y is matched to the fiscal year starting in Y.
---   * Merged: Daman & Diu + Dadra & Nagar Haveli -> one UT
---             Ladakh -> Jammu and Kashmir (GSDP / population sources do not
---             split it consistently, so all tables are combined at J&K level)
---   * Dropped: 'other territory', 'india'
 -- =====================================================================
-
-use logistic_db;
 
 show tables;
 
@@ -30,9 +13,6 @@ select * from population limit 5;
 
 -- =====================================================================
 -- 1. STATE NAME STANDARDISATION
--- Raw names are first normalised inline (lower, trim, '*', '(ut)', '-ut',
--- '&' -> 'and'). Names that still differ across tables are fixed here.
--- Anything not listed passes through unchanged.
 -- =====================================================================
 drop table if exists state_alias;
 
@@ -61,7 +41,7 @@ insert into state_alias (alias, state) values
 -- 2. CLEAN TABLES
 -- =====================================================================
 
--- 2.1 bills : monthly, one row per state-month (merged states summed)
+-- 2.1 bills : monthly, one row per state-month
 drop table if exists bills;
 
 create table bills as
