@@ -1,9 +1,3 @@
--- Active: 1745477253100@@127.0.0.1@3306@logistic_db
--- =====================================================================
--- Distribution Hub Optimizer (India)
--- Database : logistic_db
--- =====================================================================
-
 show tables;
 
 select * from bill limit 5;
@@ -11,9 +5,11 @@ select * from gsdp limit 5;
 select * from population limit 5;
 
 
--- =====================================================================
--- 1. STATE NAME STANDARDISATION
--- =====================================================================
+------------------------------------------------
+-- Shared setup
+------------------------------------------------
+
+-- State name standardisation
 drop table if exists state_alias;
 
 create table state_alias (
@@ -37,35 +33,19 @@ insert into state_alias (alias, state) values
     ('telengana', 'telangana');
 
 
--- =====================================================================
--- 2. CLEAN TABLES
--- =====================================================================
-
--- 2.1 bills : monthly, one row per state-month
+-- bills : monthly, one row per state-month
 drop table if exists bills;
 
 create table bills as
-select
-    g.state,
-    g.`year`,
-    g.`month`,
-    str_to_date(concat(g.`year`, '-', lpad(g.`month`, 2, '0'), '-01'), '%Y-%m-%d') as period,
-    case when g.`month` >= 4 then g.`year` else g.`year` - 1 end as fy_start,
-    concat(
-        case when g.`month` >= 4 then g.`year` else g.`year` - 1 end,
-        '-',
-        right(case when g.`month` >= 4 then g.`year` else g.`year` - 1 end + 1, 2)
-    ) as fy,
-    g.intra_suppliers,
-    g.intra_bills,
-    g.intra_assets,
-    g.inter_out_suppliers,
-    g.inter_out_bills,
-    g.inter_out_asset,
-    g.inter_in_suppliers,
-    g.inter_in_bills,
-    g.inter_in_asset
-from (
+with cleaned as (
+    select
+        w.*,
+        trim(replace(replace(replace(replace(replace(
+            lower(trim(w.state_name)),
+        '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
+    from bill w
+),
+grouped as (
     select
         coalesce(a.state, r.k) as state,
         r.`year`,
@@ -79,47 +59,51 @@ from (
         sum(r.inter_in_suplliers) as inter_in_suppliers,
         sum(r.inter_in_bill) as inter_in_bills,
         round(sum(r.inter_in_asset), 2) as inter_in_asset
-    from (
-        select
-            w.*,
-            trim(replace(replace(replace(replace(replace(
-                lower(trim(w.state_name)),
-            '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
-        from bill w
-    ) r
+    from cleaned r
     left join state_alias a on a.alias = r.k
     where r.k not in ('other territory', 'india')
     group by coalesce(a.state, r.k), r.`year`, r.`month`
-) g;
+),
+fiscal as (
+    select
+        g.*,
+        str_to_date(concat(g.`year`, '-', lpad(g.`month`, 2, '0'), '-01'), '%Y-%m-%d') as period,
+        case when g.`month` >= 4 then g.`year` else g.`year` - 1 end as fy_start
+    from grouped g
+)
+select
+    state,
+    `year`,
+    `month`,
+    period,
+    fy_start,
+    concat(fy_start, '-', right(fy_start + 1, 2)) as fy,
+    intra_suppliers,
+    intra_bills,
+    intra_assets,
+    inter_out_suppliers,
+    inter_out_bills,
+    inter_out_asset,
+    inter_in_suppliers,
+    inter_in_bills,
+    inter_in_asset
+from fiscal;
 
 select * from bills limit 5;
 
 
--- 2.2 bills_fy : fiscal-year totals, complete (12-month) fiscal years only
-drop table if exists bills_fy;
-
-create table bills_fy as
-select
-    state,
-    fy_start,
-    fy,
-    count(distinct period) as months,
-    sum(intra_bills + inter_out_bills + inter_in_bills) as bill_volume,
-    round(sum(intra_assets + inter_out_asset + inter_in_asset), 2) as bill_amount,
-    round(sum(intra_assets), 2) as intra_amount,
-    round(sum(inter_out_asset), 2) as inter_out_amount,
-    round(sum(inter_in_asset), 2) as inter_in_amount
-from bills
-group by state, fy_start, fy
-having count(distinct period) = 12;
-
-select * from bills_fy order by state, fy_start limit 10;
-
-
--- 2.3 gsdp_clean : one row per state, columns are fiscal years
+-- gsdp_clean : one row per state, columns are fiscal years
 drop table if exists gsdp_clean;
 
 create table gsdp_clean as
+with cleaned as (
+    select
+        g.*,
+        trim(replace(replace(replace(replace(replace(
+            lower(trim(g.`state/ut`)),
+        '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
+    from gsdp g
+)
 select
     coalesce(a.state, r.k) as state,
     round(sum(r.`2018-19`), 2) as `2018-19`,
@@ -128,14 +112,7 @@ select
     round(sum(r.`2021-22`), 2) as `2021-22`,
     round(sum(r.`2022-23`), 2) as `2022-23`,
     round(sum(r.`2023-24`), 2) as `2023-24`
-from (
-    select
-        g.*,
-        trim(replace(replace(replace(replace(replace(
-            lower(trim(g.`state/ut`)),
-        '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
-    from gsdp g
-) r
+from cleaned r
 left join state_alias a on a.alias = r.k
 where r.k not in ('other territory', 'india')
 group by coalesce(a.state, r.k);
@@ -143,10 +120,18 @@ group by coalesce(a.state, r.k);
 select * from gsdp_clean limit 5;
 
 
--- 2.4 population_clean : one row per state, columns are calendar years
+-- population_clean : one row per state, columns are calendar years
 drop table if exists population_clean;
 
 create table population_clean as
+with cleaned as (
+    select
+        p.*,
+        trim(replace(replace(replace(replace(replace(
+            lower(trim(p.`state/ut`)),
+        '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
+    from population p
+)
 select
     coalesce(a.state, r.k) as `state`,
     sum(r.`2018`) as `2018`,
@@ -158,14 +143,7 @@ select
     sum(r.`2024`) as `2024`,
     sum(r.`2025`) as `2025`,
     sum(r.`2026`) as `2026`
-from (
-    select
-        p.*,
-        trim(replace(replace(replace(replace(replace(
-            lower(trim(p.`state/ut`)),
-        '*', ''), '(ut)', ''), '-ut', ''), '&', 'and'), '  ', ' ')) as k
-    from population p
-) r
+from cleaned r
 left join state_alias a on a.alias = r.k
 where r.k not in ('other territory', 'india')
 group by coalesce(a.state, r.k);
@@ -173,30 +151,116 @@ group by coalesce(a.state, r.k);
 select * from population_clean limit 5;
 
 
--- 2.5 gsdp_long : state x fiscal year
-drop table if exists gsdp_long;
+-- Join checks (each should return no rows)
+select distinct b.state as in_bills_not_in_gsdp
+from bills b
+left join gsdp_clean g on g.state = b.state
+where g.state is null;
 
-create table gsdp_long as
-select state, 2018 as fy_start, '2018-19' as fy, `2018-19` as gsdp from gsdp_clean
-union all
-select state, 2019, '2019-20', `2019-20` from gsdp_clean
-union all
-select state, 2020, '2020-21', `2020-21` from gsdp_clean
-union all
-select state, 2021, '2021-22', `2021-22` from gsdp_clean
-union all
-select state, 2022, '2022-23', `2022-23` from gsdp_clean
-union all
-select state, 2023, '2023-24', `2023-24` from gsdp_clean;
+select distinct b.state as in_bills_not_in_population
+from bills b
+left join population_clean p on p.state = b.state
+where p.state is null;
+
+select g.state as in_gsdp_not_in_bills
+from gsdp_clean g
+left join (select distinct state from bills) b on b.state = g.state
+where b.state is null;
+
+select p.state as in_population_not_in_bills
+from population_clean p
+left join (select distinct state from bills) b on b.state = p.state
+where b.state is null;
+
+------------------------------------------------
+-- Shared setup done
+------------------------------------------------
 
 
--- 2.6 population_long : state x year (source is in thousands -> people)
--- The 'india' filter wraps the whole union so it applies to every year.
-drop table if exists population_long;
 
-create table population_long as
-select state, `year`, population
-from (
+------------------------------------------------
+-- Creating the Data to solve the first question
+------------------------------------------------
+
+drop view if exists forecasting_data;
+
+create view forecasting_data as
+with complete_fy as (
+    select
+        state,
+        fy_start,
+        fy
+    from bills
+    group by state, fy_start, fy
+    having count(distinct period) = 12
+),
+totaled as (
+    select
+        b.state,
+        b.period,
+        date_format(b.period, '%Y-%m') as `date`,
+        b.fy,
+        (b.intra_bills + b.inter_out_bills + b.inter_in_bills) as bill_volume,
+        round((b.intra_assets + b.inter_out_asset + b.inter_in_asset), 2) as bill_amount
+    from bills b
+    join complete_fy f
+        on f.state = b.state and f.fy_start = b.fy_start
+)
+select
+    state,
+    `date`,
+    fy,
+    bill_volume,
+    bill_amount,
+    round(avg(bill_volume) over (partition by state order by period rows between 2 preceding and current row), 2) as avg_bill_3m,
+    round(avg(bill_amount) over (partition by state order by period rows between 2 preceding and current row), 2) as avg_amount_3m,
+    round(avg(bill_amount) over (partition by state order by period rows between 11 preceding and current row), 2) as avg_amount_12m
+from totaled;
+
+select * from forecasting_data order by state, `date` limit 10;
+
+------------------------------------------------
+-- Created The Data to solve the first question
+------------------------------------------------
+
+
+
+------------------------------------------------
+-- Creating the Data to solve the second question
+------------------------------------------------
+
+drop view if exists gain_classification;
+
+create view gain_classification as
+with bills_fy as (
+    select
+        state,
+        fy_start,
+        fy,
+        count(distinct period) as months,
+        sum(intra_bills + inter_out_bills + inter_in_bills) as bill_volume,
+        round(sum(intra_assets + inter_out_asset + inter_in_asset), 2) as bill_amount,
+        round(sum(intra_assets), 2) as intra_amount,
+        round(sum(inter_out_asset), 2) as inter_out_amount,
+        round(sum(inter_in_asset), 2) as inter_in_amount
+    from bills
+    group by state, fy_start, fy
+    having count(distinct period) = 12
+),
+gsdp_long as (
+    select state, 2018 as fy_start, '2018-19' as fy, `2018-19` as gsdp from gsdp_clean
+    union all
+    select state, 2019, '2019-20', `2019-20` from gsdp_clean
+    union all
+    select state, 2020, '2020-21', `2020-21` from gsdp_clean
+    union all
+    select state, 2021, '2021-22', `2021-22` from gsdp_clean
+    union all
+    select state, 2022, '2022-23', `2022-23` from gsdp_clean
+    union all
+    select state, 2023, '2023-24', `2023-24` from gsdp_clean
+),
+population_union as (
     select state, 2018 as `year`, `2018` * 1000 as population from population_clean
     union all
     select state, 2019, `2019` * 1000 from population_clean
@@ -214,85 +278,34 @@ from (
     select state, 2025, `2025` * 1000 from population_clean
     union all
     select state, 2026, `2026` * 1000 from population_clean
-) u
-where state != 'india';
-
-
--- 2.7 fy_panel : state x fiscal year with bills, GSDP and population together
--- Only fiscal years present in all three sources are kept.
-drop table if exists fy_panel;
-
-create table fy_panel as
-select
-    b.state,
-    b.fy_start,
-    b.fy,
-    p.population,
-    g.gsdp,
-    b.bill_volume,
-    b.bill_amount,
-    b.intra_amount,
-    b.inter_out_amount,
-    b.inter_in_amount,
-    round(b.bill_amount / p.population, 4) as per_capita_amount
-from bills_fy b
-join gsdp_long g
-    on g.state = b.state and g.fy_start = b.fy_start
-join population_long p
-    on p.state = b.state and p.`year` = b.fy_start
-where g.gsdp is not null
-  and p.population is not null;
-
-select * from fy_panel order by state, fy_start limit 10;
-
-
--- =====================================================================
--- 3. JOIN CHECKS (each should return no rows)
--- =====================================================================
-select distinct state as in_bills_not_in_gsdp from bills where state not in (select state from gsdp_clean);
-select distinct state as in_bills_not_in_population from bills where state not in (select state from population_clean);
-select state as in_gsdp_not_in_bills from gsdp_clean where state not in (select state from bills);
-select state as in_population_not_in_bills from population_clean where state not in (select state from bills);
-
-
--- =====================================================================
--- 4. VIEWS (one per question)
--- =====================================================================
-
--- Q1. Forecasting: monthly goods amount per state (complete fiscal years)
---     with 3-month and 12-month rolling averages.
-drop view if exists forecasting_data;
-
-create view forecasting_data as
-with totaled as (
+),
+population_long as (
+    select state, `year`, population
+    from population_union
+    where state != 'india'
+),
+fy_panel as (
     select
         b.state,
-        b.period,
-        date_format(b.period, '%Y-%m') as `date`,
+        b.fy_start,
         b.fy,
-        (b.intra_bills + b.inter_out_bills + b.inter_in_bills) as bill_volume,
-        round((b.intra_assets + b.inter_out_asset + b.inter_in_asset), 2) as bill_amount
-    from bills b
-    join bills_fy f
-        on f.state = b.state and f.fy_start = b.fy_start
-)
-select
-    state,
-    `date`,
-    fy,
-    bill_volume,
-    bill_amount,
-    round(avg(bill_volume) over (partition by state order by period rows between 2 preceding and current row), 2) as avg_bill_3m,
-    round(avg(bill_amount) over (partition by state order by period rows between 2 preceding and current row), 2) as avg_amount_3m,
-    round(avg(bill_amount) over (partition by state order by period rows between 11 preceding and current row), 2) as avg_amount_12m
-from totaled;
-
-
--- Q2. Per capita amount gain vs GSDP gain, first to last common fiscal year.
-drop view if exists gain_classification;
-
-create view gain_classification as
-with window_fy as (
+        p.population,
+        g.gsdp,
+        b.bill_volume,
+        b.bill_amount,
+        b.intra_amount,
+        b.inter_out_amount,
+        b.inter_in_amount,
+        round(b.bill_amount / p.population, 4) as per_capita_amount
+    from bills_fy b
+    join gsdp_long g
+        on g.state = b.state and g.fy_start = b.fy_start
+    join population_long p
+        on p.state = b.state and p.`year` = b.fy_start
+    where g.gsdp is not null
+      and p.population is not null
+),
+window_fy as (
     select min(fy_start) as first_fy, max(fy_start) as last_fy
     from fy_panel
 ),
@@ -336,13 +349,95 @@ select
     end as gain_class
 from gains;
 
+select * from gain_classification order by gain_gap_pct desc;
 
--- Q3. Clustering features: one row per state, averaged over the common
---     fiscal-year window (states must have every year in the window).
+------------------------------------------------
+-- Created The Data to solve the second question
+------------------------------------------------
+
+
+
+------------------------------------------------
+-- Creating the Data to solve the third question
+------------------------------------------------
+
 drop view if exists cluster_data;
 
 create view cluster_data as
-with window_fy as (
+with bills_fy as (
+    select
+        state,
+        fy_start,
+        fy,
+        count(distinct period) as months,
+        sum(intra_bills + inter_out_bills + inter_in_bills) as bill_volume,
+        round(sum(intra_assets + inter_out_asset + inter_in_asset), 2) as bill_amount,
+        round(sum(intra_assets), 2) as intra_amount,
+        round(sum(inter_out_asset), 2) as inter_out_amount,
+        round(sum(inter_in_asset), 2) as inter_in_amount
+    from bills
+    group by state, fy_start, fy
+    having count(distinct period) = 12
+),
+gsdp_long as (
+    select state, 2018 as fy_start, '2018-19' as fy, `2018-19` as gsdp from gsdp_clean
+    union all
+    select state, 2019, '2019-20', `2019-20` from gsdp_clean
+    union all
+    select state, 2020, '2020-21', `2020-21` from gsdp_clean
+    union all
+    select state, 2021, '2021-22', `2021-22` from gsdp_clean
+    union all
+    select state, 2022, '2022-23', `2022-23` from gsdp_clean
+    union all
+    select state, 2023, '2023-24', `2023-24` from gsdp_clean
+),
+population_union as (
+    select state, 2018 as `year`, `2018` * 1000 as population from population_clean
+    union all
+    select state, 2019, `2019` * 1000 from population_clean
+    union all
+    select state, 2020, `2020` * 1000 from population_clean
+    union all
+    select state, 2021, `2021` * 1000 from population_clean
+    union all
+    select state, 2022, `2022` * 1000 from population_clean
+    union all
+    select state, 2023, `2023` * 1000 from population_clean
+    union all
+    select state, 2024, `2024` * 1000 from population_clean
+    union all
+    select state, 2025, `2025` * 1000 from population_clean
+    union all
+    select state, 2026, `2026` * 1000 from population_clean
+),
+population_long as (
+    select state, `year`, population
+    from population_union
+    where state != 'india'
+),
+fy_panel as (
+    select
+        b.state,
+        b.fy_start,
+        b.fy,
+        p.population,
+        g.gsdp,
+        b.bill_volume,
+        b.bill_amount,
+        b.intra_amount,
+        b.inter_out_amount,
+        b.inter_in_amount,
+        round(b.bill_amount / p.population, 4) as per_capita_amount
+    from bills_fy b
+    join gsdp_long g
+        on g.state = b.state and g.fy_start = b.fy_start
+    join population_long p
+        on p.state = b.state and p.`year` = b.fy_start
+    where g.gsdp is not null
+      and p.population is not null
+),
+window_fy as (
     select min(fy_start) as first_fy, max(fy_start) as last_fy
     from fy_panel
 )
@@ -366,10 +461,8 @@ cross join window_fy w
 group by p.state
 having count(*) = max(w.last_fy - w.first_fy + 1);
 
-
--- =====================================================================
--- 5. QUICK CHECKS
--- =====================================================================
-select * from forecasting_data order by state, `date` limit 10;
-select * from gain_classification order by gain_gap_pct desc;
 select * from cluster_data;
+
+------------------------------------------------
+-- Created The Data to solve the third question
+------------------------------------------------
